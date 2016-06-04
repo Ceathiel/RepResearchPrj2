@@ -1,0 +1,194 @@
+---
+title: "Analysis of the Population and Economic Impact of Severe Weather Events in the United States"
+author: "Rhea Lucas"
+output:
+  html_document:
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For this analysis, we are looking at data for storms and severe weather events. We are particularly interested in the impact they have to population health due to fatalities and injuries that can occur during these events, as well as their impact to the economy as a result of property damage brought by these events.
+
+Insert Results summary here
+
+Data from the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database was used in this analysis.
+
+## Data Processing
+
+For the purpose of this study, we are using prepared data that can be downloaded from [here](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
+
+We will read in this data using the `read.csv()` function which allows us to read from zipped file. Since the dataset is quite big, it may take some time to read it in.
+
+### Loading and exploring the Data
+
+```{r loading, cache=TRUE}
+weatherData <- read.csv("repdata-data-StormData.csv.bz2")
+```
+
+Now that we've read the data, we can explore how it looks. We see that there's a total of 902297 observations for 37 variables, with the variable `EVTYPE` providing us information on what type of events were recorded.
+
+Other variables to note are `FATALITIES`, `INJURIES`, `PROPDMG`, `PROPDMGEXP`, `CROPDMG`, `CROPDMGEXP` which looks like relevant variables for our analysis.
+
+```{r exploreData}
+nrow(weatherData)
+names(weatherData)
+```
+
+Looking deeper into the `EVTYPE`, we can see that there are 985 unique event types in the dataset. However, if we convert EVTYPE to uppercase, we can see that this is reduced to 898, which tells us that there are similar events using different letter cases, and we should probably fix this in our data.
+
+```{r eventCheck}
+nrow(table(weatherData$EVTYPE))
+nrow(table(toupper(weatherData$EVTYPE)))
+```
+
+We also have `FATALITIES` and `INJURIES` which we will use to analyze impact on population health. Looking at the summary for these variables, it looks like there are a lot of 0 values in the dataset with the very low mean and 3rd quantile being 0. In fact, if we look at the number of rows that have 0 `FATALITIES` and `INJURIES` we see that 880368 of 902297 (97.6%) of the data has 0 impact to population health.
+
+This is something that we should take note of for our analysis later.
+
+```{r healthSummary}
+summary(weatherData$FATALITIES)
+summary(weatherData$INJURIES)
+
+nrow(weatherData[weatherData$FATALITIES+weatherData$INJURIES==0,])
+```
+
+On the other hand, it seems that more events (657266 of 902297, 72.3%) have caused Property or Crop damage, basing on the checks for `PROPDMG` and `CROPDMG` variable.
+
+```{r propSummar}
+summary(weatherData$PROPDMG)
+summary(weatherData$CROPDMG)
+
+nrow(weatherData[weatherData$PROPDMG+weatherData$CROPDMG==0,])
+```
+
+Finally, we check `PROPDMGEXP` and `CROPDMGEXP` variables to see what exponents we're dealing with for property damage as we need to use this for comparing impact to property in our analysis later on. 
+
+Looking at the summary for these exponent variables, we see that exponents are either numeric or letters which in indicate a multiplier (i.e. 0=10^0, 1=10^1, H=10^2, K=10^3, etc.). 
+
+```{r expSummary}
+summary(weatherData$PROPDMGEXP)
+summary(weatherData$CROPDMGEXP)
+```
+
+We also see that there are signs (-/+/?) in the exponent variables, whose values are a bit harder to deduce so we need to look at the data using these exponents. First, for `?` we see that the property and crop damage are all 0's so we will assume multiplier for `?` is 0. For `-` and `+`, since there are non-zero values for property damage using this exponent, we will assume multiplier is 10^0 (1).
+
+```{r expCheck}
+weatherData[weatherData$PROPDMGEXP=="?", c("PROPDMG", "CROPDMG")]
+weatherData[weatherData$PROPDMGEXP=="+", "PROPDMG"]
+weatherData[weatherData$PROPDMGEXP=="-", "PROPDMG"]
+```
+
+### Cleaning the Data
+
+Now that we've explored our data, we will clean it up a bit for it to be more useable for our analysis. First, we make sure all values for `EVTYPE` are all in uppercase. We also convert the variable `BGN_DATE` from factor to date to make it easier to extract the year from it later on.
+
+```{r cleanData1}
+weatherData$BGN_DATE <- as.Date(weatherData$BGN_DATE, "%m/%d/%Y")
+weatherData$EVTYPE <- toupper(weatherData$EVTYPE)
+```
+
+We also change the values in `PROPDMGEXP` and `CROPDMGEXP` to multipliers we deduced from exploring these variables earlier. We do this by creating a new data frame with the mapping from current values to equivalent multipliers. Afterwards, we use the `mapvalues()` function in `dplyr` package to perform the replacement.
+
+```{r cleanData2}
+library(plyr)
+expmapping <- data.frame(expValue=c("-", "?", "+", "0", "1", "2", "3", "4", 
+                                    "5", "6", "7", "8", "B", "H", "K", "M", ""),
+                      multiplier=c(10^0, 0, 10^0, 10^0, 10^1, 10^2, 10^3, 10^4, 
+                                   10^5, 10^6, 10^7, 10^8, 10^9, 10^2, 10^3, 10^6, 10^0))
+
+weatherData$PROPDMGEXP <- mapvalues(toupper(weatherData$PROPDMGEXP), 
+                                    expmapping$expValue, expmapping$multiplier)
+weatherData$CROPDMGEXP <- mapvalues(toupper(weatherData$CROPDMGEXP), 
+                                    expmapping$expValue, expmapping$multiplier)
+weatherData$PROPDMGEXP <- as.numeric(weatherData$PROPDMGEXP)
+weatherData$CROPDMGEXP <- as.numeric(weatherData$CROPDMGEXP)
+table(weatherData$PROPDMGEXP)
+table(weatherData$CROPDMGEXP)
+```
+
+## Results
+
+To find out which event has the most impact to population health, we want to look look at how many injuries and fatalities did each type of event cause. To show this, we create a new `healthSummary` data frame using `dplyr` package which has the sum of `FATALITIES` and `INJURIES` per `EVTYPE`. Since we're not interested in events which has 0 `FATALITIES` and `INJURIES`` for this analysis, we will remove them from the dataset.
+
+```{r calcFatalities}
+library(dplyr, warn.conflicts = FALSE)
+
+healthSummary <- group_by(weatherData, EVTYPE) %>% #create grouping
+                 summarise(TOT_FATALITIES=sum(FATALITIES),
+                           TOT_INJURIES=sum(INJURIES),
+                           TOT_IMPACT=sum(FATALITIES+INJURIES),
+                           EVT_OCCURENCE=n()) %>%
+                 filter(TOT_IMPACT!=0) %>% #filter rows
+                 arrange(desc(TOT_IMPACT)) #sort by total impact
+healthTop <- healthSummary[1:10,]                 
+```
+
+We will now plot the top 10 event types with the most population health impact based on fatalities and Injuries caused. Based on the plot, we see that Tornadoes, by far have the most impact to population health followed by excessive heat.
+
+```{r plotFatalities, fig.width=9, fig.cap="Top 10 Events Impacting Population Health in the United States"}
+par(mfrow=c(1,3))
+barplot(healthTop$TOT_FATALITIES, col = rainbow(10),
+        xlab="Event Types", ylab="Total Fatalities", 
+        main="Fatalities by Event Type")
+barplot(healthTop$TOT_INJURIES, col = rainbow(10),
+        xlab="Event Types", ylab="Total Injuries", 
+        main="Injuries by Event Type")
+barplot(healthTop$TOT_IMPACT, legend.text = healthTop$EVTYPE, col = rainbow(10),
+        xlab="Event Types", ylab="Total Injuries and Fatalities", 
+        main="Total Impact by Event Type")
+
+print(healthTop)
+```
+
+On the other hand, to see which events have the most impact to the economy, we will create a new summary, this time using `CROPDMG` and `PROPDMG` and taking note of the multipliers set in `CROPDMGEXP` and `PROPDMGEXP`.
+
+Same as what we did for population health, we will be looking at the top 10 events
+
+```{r calcDamage}
+dmgSummary <- group_by(weatherData, EVTYPE) %>% #create grouping
+                 summarise(TOT_PROPDMG=sum(PROPDMG*PROPDMGEXP),
+                           TOT_CROPDMG=sum(CROPDMG*CROPDMGEXP),
+                           EVT_OCCURENCE=n()) %>%
+                 mutate(TOT_DMG=TOT_PROPDMG+TOT_CROPDMG) %>%
+                 filter(TOT_DMG!=0) %>% #filter rows
+                 arrange(desc(TOT_DMG)) #sort by total impact
+dmgTop <- dmgSummary[1:10,] 
+```
+
+Plotting the events with the most economic impact, we can see that floods caused the most property damage while drought caused the most crop damage. In total though, floods has the most economic impact, followed by hurricane/typhoon and finally tornadoes.
+
+```{r plotDmg, fig.width=9, fig.cap="Top 10 Events Impacting the Economy in the United States"}
+par(mfrow=c(1,3))
+barplot(dmgTop$TOT_PROPDMG, col = rainbow(10),
+        xlab="Event Types", ylab="Total Property Damage", 
+        main="Property Damage by Event Type")
+barplot(dmgTop$TOT_CROPDMG, col = rainbow(10),
+        xlab="Event Types", ylab="Total Crop Damage", 
+        main="Crop Damage by Event Type")
+barplot(dmgTop$TOT_DMG, legend.text = dmgTop$EVTYPE, col = rainbow(10),
+        xlab="Event Types", ylab="Total Property and Crop Damage", 
+        main="Total Damage by Event Type")
+
+print(dmgTop)
+```
+
+Finally, it's also worth looking at how often do these types of events occur to see what events can be prioritized in terms of preparing resources for.
+
+``` {r occurenceData}
+library(lubridate, warn.conflicts = FALSE)
+
+byYearFatality <- group_by(weatherData, EVTYPE, year(BGN_DATE)) %>% 
+                  summarize(TOT_FATALITIES=sum(FATALITIES), TOT_INJURIES=sum(INJURIES), 
+                            AVG_FATALITIES=round(mean(FATALITIES), 4), AVG_INJURIES=round(mean(INJURIES), 4), 
+                            EVT_OCCURENCE=n())
+
+byEventImpact <- group_by(byYearFatality, EVTYPE) %>% 
+                 summarize(TOT_IMPACT=sum(TOT_FATALITIES+TOT_INJURIES), 
+                           AVG_IMPACT=round(mean(AVG_FATALITIES+AVG_INJURIES), 4), 
+                           AVG_OCC=mean(EVT_OCCURENCE), TOT_OCC=sum(EVT_OCCURENCE)) %>% 
+                 filter(TOT_IMPACT!=0)
+```
+
